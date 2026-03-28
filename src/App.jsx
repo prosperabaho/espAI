@@ -188,7 +188,8 @@ export default function App() {
               setHardwareLogs(prev => [`TX: ${cmdString}`, ...prev]);
               if (navigator.vibrate) navigator.vibrate(50);
             } else {
-              setMessages(prev => [...prev, { role: 'system', content: 'Command skipped: Device not connected.' }]);
+              setHardwareLogs(prev => [`[TEST MODE] Would send: ${cmdString}`, ...prev]);
+              setMessages(prev => [...prev, { role: 'system', content: `Test Mode: Command "${cmdString}" simulated.` }]);
             }
           }
         }
@@ -210,6 +211,61 @@ export default function App() {
       setIsProcessing(false);
     }
   };
+
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [passwordError, setPasswordError] = useState(false);
+
+  const handleUnlock = (e) => {
+    e.preventDefault();
+    if (passwordInput.toLowerCase() === 'esp') {
+      setIsUnlocked(true);
+      if (navigator.vibrate) navigator.vibrate(100);
+    } else {
+      setPasswordError(true);
+      setTimeout(() => setPasswordError(false), 1000);
+    }
+  };
+
+  if (!isUnlocked) {
+    return (
+      <div className="min-h-screen bg-[#0A0A0B] flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-[#18181B] border border-[#27272A] rounded-2xl p-8 shadow-2xl"
+        >
+          <div className="flex justify-center mb-6">
+            <div className="p-4 bg-orange-500/10 rounded-full">
+              <Cpu className="w-12 h-12 text-orange-500" />
+            </div>
+          </div>
+          <h1 className="text-2xl font-bold text-center mb-2">Access Restricted</h1>
+          <p className="text-[#A1A1AA] text-center mb-8 italic">
+            "What is the 3-letter acronym for the Extra Sensory Perception sensor used in this prototype?"
+          </p>
+          <form onSubmit={handleUnlock} className="space-y-4">
+            <input
+              type="password"
+              value={passwordInput}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              placeholder="Enter code..."
+              className={cn(
+                "w-full bg-[#09090B] border border-[#27272A] rounded-xl px-4 py-3 outline-none transition-all focus:border-orange-500/50",
+                passwordError && "border-red-500/50 animate-shake"
+              )}
+            />
+            <button
+              type="submit"
+              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 rounded-xl transition-colors shadow-lg shadow-orange-500/20"
+            >
+              Unlock Interface
+            </button>
+          </form>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0A0A0B] text-[#E4E4E7] font-sans selection:bg-orange-500/30">
