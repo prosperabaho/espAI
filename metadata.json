@@ -1,0 +1,7 @@
+{
+  "name": "ESP32 AI Agent",
+  "description": "An intelligent agentic interface to control and monitor ESP32 hardware via Web Bluetooth.",
+  "requestFramePermissions": [
+    "bluetooth"
+  ]
+}
