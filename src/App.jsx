@@ -48,6 +48,11 @@ export default function App() {
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
   const [currentTemp, setCurrentTemp] = useState(null);
   const [currentHum, setCurrentHum] = useState(null);
+  const [hardwareManifest, setHardwareManifest] = useState(() => {
+    return localStorage.getItem('hardwareManifest') || 
+      "1. Relay 1: Controls the desk lamp (Action: RELAY_1:ON/OFF)\n2. Servo 1: Controls the window blind (Action: SERVO_1:0-180)\n3. NeoPixel: RGB strip for mood lighting (Action: RGB:R,G,B)";
+  });
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
   
   const chatEndRef = useRef(null);
   const recognitionRef = useRef(null);
@@ -175,7 +180,7 @@ export default function App() {
       const sensorContext = `[Current Sensor Context: Temp=${currentTemp ?? 'N/A'}°C, Humidity=${currentHum ?? 'N/A'}%]`;
       const fullPrompt = `${sensorContext}\nUser: ${userMsg}`;
 
-      const response = await geminiAgent.processCommand(fullPrompt, history);
+      const response = await geminiAgent.processCommand(fullPrompt, history, hardwareManifest);
       
       if (response.functionCalls) {
         for (const call of response.functionCalls) {
@@ -191,6 +196,12 @@ export default function App() {
               setHardwareLogs(prev => [`[TEST MODE] Would send: ${cmdString}`, ...prev]);
               setMessages(prev => [...prev, { role: 'system', content: `Test Mode: Command "${cmdString}" simulated.` }]);
             }
+          } else if (call.name === 'updateHardwareManifest') {
+            const { newManifest } = call.args;
+            setHardwareManifest(newManifest);
+            localStorage.setItem('hardwareManifest', newManifest);
+            setMessages(prev => [...prev, { role: 'system', content: "Hardware Manifest Updated by Agent." }]);
+            if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
           }
         }
       }
@@ -288,6 +299,13 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setIsConfigOpen(true)}
+              className="p-2 rounded-lg border border-white/10 bg-white/5 text-white/60 hover:text-white hover:bg-white/10 transition-all"
+              title="Hardware Configuration"
+            >
+              <Settings size={18} />
+            </button>
             <button
               onClick={() => setIsContinuousMode(!isContinuousMode)}
               title="Continuous Conversation Mode"
@@ -530,6 +548,83 @@ export default function App() {
           Web Bluetooth • Voice Recognition • Gemini AI Agent • Real-time Telemetry
         </p>
       </footer>
+
+      {/* Hardware Configuration Modal */}
+      <AnimatePresence>
+        {isConfigOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full max-w-2xl bg-[#18181B] border border-white/10 rounded-2xl overflow-hidden shadow-2xl"
+            >
+              <div className="p-6 border-b border-white/5 flex items-center justify-between bg-white/5">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-orange-500/10 rounded-lg">
+                    <Settings className="w-5 h-5 text-orange-500" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold">Hardware Manifest</h2>
+                    <p className="text-xs text-white/40 uppercase tracking-widest">Define your custom devices & commands</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsConfigOpen(false)}
+                  className="p-2 hover:bg-white/5 rounded-lg transition-colors"
+                >
+                  <RefreshCw className="w-5 h-5 opacity-40 rotate-45" />
+                </button>
+              </div>
+              
+              <div className="p-6 space-y-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-bold tracking-[0.2em] text-orange-500/70">
+                    System Instructions for the AI Agent
+                  </label>
+                  <p className="text-xs text-white/40 leading-relaxed">
+                    Describe your hardware setup here. The AI will use these instructions to understand what devices are connected and what commands to send via the <code className="text-orange-500/80 bg-orange-500/5 px-1 rounded">controlHardware</code> function.
+                  </p>
+                  <textarea
+                    value={hardwareManifest}
+                    onChange={(e) => {
+                      setHardwareManifest(e.target.value);
+                      localStorage.setItem('hardwareManifest', e.target.value);
+                    }}
+                    placeholder="e.g. 1. Relay 1: Controls the desk lamp (Action: RELAY_1:ON/OFF)..."
+                    className="w-full h-64 bg-[#09090B] border border-white/10 rounded-xl p-4 text-sm font-mono focus:outline-none focus:border-orange-500/50 transition-all resize-none"
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => handleSendMessage("Please review my current hardware manifest and optimize the instructions for better control. If it's empty, suggest a standard starter setup.")}
+                      className="text-[10px] uppercase font-bold tracking-widest text-orange-500 hover:text-orange-400 transition-colors flex items-center gap-2"
+                    >
+                      <Zap size={12} />
+                      Optimize with AI
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="bg-orange-500/5 border border-orange-500/10 rounded-xl p-4 flex gap-4 items-start">
+                  <Activity className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
+                  <div className="text-xs text-orange-500/80 leading-relaxed">
+                    <strong>Pro Tip:</strong> Be specific about the command strings your ESP32 expects. For example, if you use <code className="bg-orange-500/10 px-1 rounded">SERVO:90</code>, tell the agent exactly that.
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-6 bg-white/5 border-t border-white/5 flex justify-end">
+                <button
+                  onClick={() => setIsConfigOpen(false)}
+                  className="px-8 py-3 bg-orange-500 hover:bg-orange-600 text-black font-bold rounded-xl transition-all shadow-lg shadow-orange-500/20"
+                >
+                  Save Configuration
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

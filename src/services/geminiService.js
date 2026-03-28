@@ -19,12 +19,27 @@ const controlHardware = {
   }
 };
 
+const updateHardwareManifest = {
+  name: "updateHardwareManifest",
+  description: "Update the system's hardware manifest with new instructions or device definitions. Use this when the user describes new hardware they've added.",
+  parameters: {
+    type: "OBJECT",
+    properties: {
+      newManifest: {
+        type: "STRING",
+        description: "The complete updated hardware manifest text, including all existing and new devices/instructions."
+      }
+    },
+    required: ["newManifest"]
+  }
+};
+
 export class GeminiAgentService {
   constructor() {
     this.ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   }
 
-  async processCommand(prompt, history = []) {
+  async processCommand(prompt, history = [], hardwareManifest = "") {
     const response = await this.ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: [
@@ -45,9 +60,16 @@ export class GeminiAgentService {
         - SERVO_MOVE: Move a servo motor (requires 'value' between 0-180).
         - CUSTOM: Any other custom command.
         
+        [HARDWARE MANIFEST & CUSTOM INSTRUCTIONS]:
+        ${hardwareManifest || "No custom hardware defined yet."}
+        
+        [SELF-CONFIGURATION]:
+        If the user describes new hardware or changes to their setup, use the 'updateHardwareManifest' tool to rewrite the manifest instructions. 
+        Always preserve existing working instructions unless the user asks to change them.
+        
         If you notice unusual sensor readings (e.g., very high temperature), mention it to the user.
         Be concise, professional, and helpful. Confirm all actions.`,
-        tools: [{ functionDeclarations: [controlHardware] }]
+        tools: [{ functionDeclarations: [controlHardware, updateHardwareManifest] }]
       }
     });
 
