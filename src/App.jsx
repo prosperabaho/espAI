@@ -46,6 +46,7 @@ export default function App() {
   const [sensorData, setSensorData] = useState([]);
   const [isListening, setIsListening] = useState(false);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
+  const [isContinuousMode, setIsContinuousMode] = useState(false);
   const [currentTemp, setCurrentTemp] = useState(null);
   const [currentHum, setCurrentHum] = useState(null);
   const [hardwareManifest, setHardwareManifest] = useState(() => {
@@ -53,6 +54,9 @@ export default function App() {
       "1. Relay 1: Controls the desk lamp (Action: RELAY_1:ON/OFF)\n2. Servo 1: Controls the window blind (Action: SERVO_1:0-180)\n3. NeoPixel: RGB strip for mood lighting (Action: RGB:R,G,B)";
   });
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [systemStatus, setSystemStatus] = useState([
+    { id: 1, text: "System Initialized", severity: "info", time: new Date().toLocaleTimeString() }
+  ]);
   
   const chatEndRef = useRef(null);
   const recognitionRef = useRef(null);
@@ -60,6 +64,42 @@ export default function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    // Initialize Speech Recognition
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+      recognitionRef.current.lang = 'en-US';
+
+      recognitionRef.current.onstart = () => {
+        setIsListening(true);
+        console.log("Speech recognition started");
+      };
+
+      recognitionRef.current.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        console.log("Speech transcript:", transcript);
+        setInput(transcript);
+        setIsListening(false);
+        handleSendMessage(transcript);
+      };
+
+      recognitionRef.current.onend = () => {
+        setIsListening(false);
+        console.log("Speech recognition ended");
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        console.error("Speech recognition error:", event.error);
+        setIsListening(false);
+      };
+    } else {
+      console.warn("Speech Recognition API not supported in this browser.");
+    }
+  }, []);
 
   useEffect(() => {
     bluetoothService.onMessageReceived = (msg) => {
@@ -77,26 +117,6 @@ export default function App() {
         setSensorData(prev => [...prev.slice(-19), { time: now, temp: currentTemp || 0, hum: value }]);
       }
     };
-
-    // Initialize Speech Recognition
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      recognitionRef.current = new SpeechRecognition();
-      recognitionRef.current.continuous = false;
-      recognitionRef.current.interimResults = false;
-      recognitionRef.current.lang = 'en-US';
-
-      recognitionRef.current.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        setInput(transcript);
-        setIsListening(false);
-        // Automatically send voice command
-        handleSendMessage(transcript);
-      };
-
-      recognitionRef.current.onend = () => setIsListening(false);
-      recognitionRef.current.onerror = () => setIsListening(false);
-    }
   }, [currentTemp, currentHum]);
 
   const handleConnect = async () => {
@@ -107,6 +127,9 @@ export default function App() {
       setMessages(prev => [...prev, { role: 'system', content: `Connected to ${name}` }]);
       if (navigator.vibrate) navigator.vibrate(100);
     } catch (error) {
+      if (error.name === 'NotFoundError' || error.message.includes('User cancelled')) {
+        return; // Silently ignore cancellation
+      }
       console.error(error);
       setMessages(prev => [...prev, { role: 'system', content: 'Connection failed. Ensure Bluetooth is enabled.' }]);
     }
@@ -120,22 +143,21 @@ export default function App() {
     if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
   };
 
-  const [isContinuousMode, setIsContinuousMode] = useState(false);
   const audioRef = useRef(null);
 
   const toggleListening = () => {
     if (isListening) {
       recognitionRef.current?.stop();
     } else {
-      // Stop any current audio if starting to listen
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
       }
-      setInput('');
-      recognitionRef.current?.start();
-      setIsListening(true);
-      if (navigator.vibrate) navigator.vibrate(50);
+      try {
+        recognitionRef.current?.start();
+      } catch (e) {
+        console.error("Failed to start recognition:", e);
+      }
     }
   };
 
@@ -202,6 +224,15 @@ export default function App() {
             localStorage.setItem('hardwareManifest', newManifest);
             setMessages(prev => [...prev, { role: 'system', content: "Hardware Manifest Updated by Agent." }]);
             if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+          } else if (call.name === 'updateSystemStatus') {
+            const { status, severity } = call.args;
+            setSystemStatus(prev => [{
+              id: Date.now(),
+              text: status,
+              severity,
+              time: new Date().toLocaleTimeString()
+            }, ...prev].slice(0, 5));
+            if (navigator.vibrate) navigator.vibrate(50);
           }
         }
       }
@@ -210,9 +241,11 @@ export default function App() {
       setMessages(prev => [...prev, { role: 'model', content: agentText }]);
       
       // Play voice and wait for it to finish if in continuous mode
-      await playVoiceResponse(agentText);
+      if (isVoiceEnabled) {
+        await playVoiceResponse(agentText);
+      }
       
-      if (isContinuousMode && isConnected) {
+      if (isContinuousMode) {
         toggleListening();
       }
     } catch (error) {
@@ -240,37 +273,37 @@ export default function App() {
 
   if (!isUnlocked) {
     return (
-      <div className="min-h-screen bg-[#0A0A0B] flex items-center justify-center p-4">
+      <div className="min-h-screen bg-black flex items-center justify-center p-4 font-sans">
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="w-full max-w-md bg-[#18181B] border border-[#27272A] rounded-2xl p-8 shadow-2xl"
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="w-full max-w-md bg-[#121212] rounded-2xl p-10 shadow-2xl border border-white/5"
         >
-          <div className="flex justify-center mb-6">
-            <div className="p-4 bg-orange-500/10 rounded-full">
-              <Cpu className="w-12 h-12 text-orange-500" />
+          <div className="flex justify-center mb-8">
+            <div className="w-20 h-20 bg-[#1DB954] rounded-full flex items-center justify-center shadow-lg shadow-[#1DB954]/20">
+              <Cpu className="w-10 h-10 text-black" />
             </div>
           </div>
-          <h1 className="text-2xl font-bold text-center mb-2">Access Restricted</h1>
-          <p className="text-[#A1A1AA] text-center mb-8 italic">
-            "What is the 3-letter acronym for the Extra Sensory Perception sensor used in this prototype?"
+          <h1 className="text-3xl font-bold text-center mb-4 text-white">System Locked</h1>
+          <p className="text-[#B3B3B3] text-center mb-10 text-sm leading-relaxed">
+            "To proceed, enter the 3-letter code for the 'Electronic Signal Processor' module found on the main circuit board."
           </p>
-          <form onSubmit={handleUnlock} className="space-y-4">
+          <form onSubmit={handleUnlock} className="space-y-6">
             <input
               type="password"
               value={passwordInput}
               onChange={(e) => setPasswordInput(e.target.value)}
-              placeholder="Enter code..."
-              className={cn(
-                "w-full bg-[#09090B] border border-[#27272A] rounded-xl px-4 py-3 outline-none transition-all focus:border-orange-500/50",
-                passwordError && "border-red-500/50 animate-shake"
-              )}
+              placeholder="Enter access code"
+                className={cn(
+                  "w-full bg-[#282828] border-none rounded-full py-4 px-6 text-center text-lg tracking-[0.5em] focus:ring-2 focus:ring-[#1DB954] transition-all placeholder:text-[#B3B3B3] placeholder:tracking-normal",
+                  passwordError && "animate-shake ring-2 ring-red-500"
+                )}
             />
             <button
               type="submit"
-              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 rounded-xl transition-colors shadow-lg shadow-orange-500/20"
+              className="w-full py-4 bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold rounded-full transition-all transform active:scale-95 shadow-xl"
             >
-              Unlock Interface
+              Unlock Terminal
             </button>
           </form>
         </motion.div>
@@ -279,346 +312,252 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0A0A0B] text-[#E4E4E7] font-sans selection:bg-orange-500/30">
-      {/* Header */}
-      <header className="border-b border-white/10 bg-black/40 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
-              <Cpu className="w-6 h-6 text-orange-500" />
-            </div>
-            <div>
-              <h1 className="font-bold text-lg tracking-tight">ESP32 AGENT PRO</h1>
-              <div className="flex items-center gap-2">
-                <div className={cn("w-2 h-2 rounded-full animate-pulse", isConnected ? "bg-green-500" : "bg-red-500")} />
-                <span className="text-[10px] uppercase tracking-widest font-bold opacity-50">
-                  {isConnected ? `Connected: ${deviceName}` : 'Offline'}
-                </span>
-              </div>
-            </div>
+    <div className="flex h-screen bg-black text-white font-sans overflow-hidden">
+      {/* Sidebar */}
+      <aside className="w-64 bg-black flex flex-col p-4 gap-4 hidden md:flex">
+        <div className="flex items-center gap-3 px-2 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-[#1DB954] flex items-center justify-center">
+            <Cpu className="w-5 h-5 text-black" />
           </div>
-          
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setIsConfigOpen(true)}
-              className="p-2 rounded-lg border border-white/10 bg-white/5 text-white/60 hover:text-white hover:bg-white/10 transition-all"
-              title="Hardware Configuration"
-            >
-              <Settings size={18} />
-            </button>
-            <button
-              onClick={() => setIsContinuousMode(!isContinuousMode)}
-              title="Continuous Conversation Mode"
-              className={cn(
-                "flex items-center gap-2 px-3 py-2 rounded-lg border transition-all text-[10px] font-bold uppercase tracking-widest",
-                isContinuousMode ? "bg-orange-500/20 border-orange-500/40 text-orange-500" : "bg-white/5 border-white/10 text-white/40"
-              )}
-            >
-              <RefreshCw size={14} className={isContinuousMode ? "animate-spin-slow" : ""} />
-              {isContinuousMode ? "Hands-Free On" : "Hands-Free Off"}
-            </button>
-            <button
-              onClick={() => setIsVoiceEnabled(!isVoiceEnabled)}
-              className={cn(
-                "p-2 rounded-lg border transition-all",
-                isVoiceEnabled ? "bg-white/5 border-white/10 text-white" : "bg-red-500/10 border-red-500/20 text-red-500"
-              )}
-            >
-              {isVoiceEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
-            </button>
-            <button
-              onClick={isConnected ? handleDisconnect : handleConnect}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-xs uppercase tracking-wider transition-all",
-                isConnected 
-                  ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500 hover:text-white" 
-                  : "bg-orange-500 text-black hover:bg-orange-400"
-              )}
-            >
-              {isConnected ? <BluetoothOff size={16} /> : <Bluetooth size={16} />}
-              {isConnected ? 'Disconnect' : 'Connect ESP32'}
-            </button>
-          </div>
+          <h1 className="font-bold text-lg tracking-tight">ESP32 Agent</h1>
         </div>
-      </header>
 
-      <main className="max-w-6xl mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-80px)]">
-        {/* Left Column: Chat Interface */}
-        <div className="lg:col-span-7 flex flex-col bg-[#121214] rounded-2xl border border-white/5 overflow-hidden shadow-2xl">
-          <div className="p-4 border-b border-white/5 flex items-center justify-between bg-white/5">
-            <div className="flex items-center gap-2">
-              <MessageSquare size={18} className="text-orange-500" />
-              <span className="font-bold text-sm uppercase tracking-widest opacity-70">Agent Console</span>
-            </div>
-            {isProcessing && (
-              <div className="flex items-center gap-2 text-xs text-orange-500 italic">
-                <RefreshCw size={12} className="animate-spin" />
-                Thinking...
-              </div>
-            )}
+        <nav className="flex flex-col gap-2">
+          <button 
+            onClick={() => setIsConfigOpen(false)}
+            className="flex items-center gap-4 px-3 py-2 rounded-md hover:bg-[#282828] transition-colors text-[#B3B3B3] hover:text-white font-bold"
+          >
+            <MessageSquare size={24} />
+            <span>Terminal</span>
+          </button>
+          <button 
+            onClick={() => setIsConfigOpen(true)}
+            className="flex items-center gap-4 px-3 py-2 rounded-md hover:bg-[#282828] transition-colors text-[#B3B3B3] hover:text-white font-bold"
+          >
+            <Settings size={24} />
+            <span>Manifest</span>
+          </button>
+        </nav>
+
+        <div className="mt-4 flex-1 bg-[#121212] rounded-lg overflow-hidden flex flex-col">
+          <div className="p-4 border-b border-white/5 flex items-center gap-2">
+            <Activity size={16} className="text-[#1DB954]" />
+            <span className="font-bold text-xs uppercase tracking-widest text-[#B3B3B3]">Status</span>
           </div>
-
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
-            <AnimatePresence initial={false}>
-              {messages.map((msg, i) => (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className={cn(
-                    "max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed",
-                    msg.role === 'user' 
-                      ? "ml-auto bg-orange-500 text-black font-medium" 
-                      : msg.role === 'system'
-                      ? "mx-auto bg-white/5 text-white/40 text-[10px] uppercase tracking-widest font-bold py-1 px-4 rounded-full border border-white/5"
-                      : "bg-white/5 text-white/90 border border-white/10"
-                  )}
-                >
-                  {msg.content}
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            <div ref={chatEndRef} />
-          </div>
-
-          <div className="p-4 bg-black/20 border-t border-white/5 space-y-3">
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <input
-                  type="text"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                  placeholder={isConnected ? "Ask the agent to control hardware..." : "Connect ESP32 to start..."}
-                  disabled={!isConnected || isProcessing}
-                  className="w-full bg-[#1A1A1C] border border-white/10 rounded-xl py-3 pl-4 pr-12 text-sm focus:outline-none focus:border-orange-500/50 transition-colors disabled:opacity-50"
-                />
-                <button
-                  onClick={() => handleSendMessage()}
-                  disabled={!isConnected || !input.trim() || isProcessing}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-orange-500 text-black rounded-lg hover:bg-orange-400 disabled:opacity-50 transition-all"
-                >
-                  <Send size={18} />
-                </button>
-              </div>
-              <button
-                onClick={toggleListening}
-                disabled={!isConnected || isProcessing}
+          <div className="flex-1 overflow-y-auto p-2 space-y-2">
+            {systemStatus.map((status) => (
+              <div 
+                key={status.id}
                 className={cn(
-                  "p-3 rounded-xl border transition-all flex items-center justify-center",
-                  isListening 
-                    ? "bg-red-500 text-white border-red-400 animate-pulse" 
-                    : "bg-white/5 border-white/10 text-white hover:bg-white/10"
+                  "p-2 rounded-md text-[10px] border border-transparent",
+                  status.severity === 'critical' ? "bg-red-500/10 text-red-400 border-red-500/20" :
+                  status.severity === 'warning' ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/20" :
+                  "bg-[#282828] text-[#B3B3B3]"
                 )}
               >
-                {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-              </button>
-            </div>
+                <p className="font-bold">{status.text}</p>
+                <p className="opacity-50 mt-1">{status.time}</p>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Right Column: Hardware Status & Charts */}
-        <div className="lg:col-span-5 flex flex-col gap-6 overflow-hidden">
-          {/* Real-time Charts */}
-          <div className="bg-[#121214] rounded-2xl border border-white/5 flex flex-col overflow-hidden h-64 shadow-xl">
-            <div className="p-4 border-b border-white/5 flex items-center justify-between bg-white/5">
-              <div className="flex items-center gap-2">
-                <TrendingUp size={18} className="text-orange-500" />
-                <span className="font-bold text-sm uppercase tracking-widest opacity-70">Sensor Trends</span>
-              </div>
-            </div>
-            <div className="flex-1 p-2">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={sensorData}>
-                  <defs>
-                    <linearGradient id="colorTemp" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="#f97316" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" vertical={false} />
-                  <XAxis dataKey="time" hide />
-                  <YAxis hide domain={[0, 100]} />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#1A1A1C', border: '1px solid #ffffff10', borderRadius: '8px' }}
-                    itemStyle={{ fontSize: '12px' }}
-                  />
-                  <Area type="monotone" dataKey="temp" stroke="#f97316" fillOpacity={1} fill="url(#colorTemp)" />
-                  <Area type="monotone" dataKey="hum" stroke="#3b82f6" fillOpacity={0} />
-                </AreaChart>
-              </ResponsiveContainer>
+        <div className="h-48 bg-[#121212] rounded-lg overflow-hidden flex flex-col">
+          <div className="p-4 border-b border-white/5 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Terminal size={16} className="text-[#1DB954]" />
+              <span className="font-bold text-xs uppercase tracking-widest text-[#B3B3B3]">Logs</span>
             </div>
           </div>
-
-          {/* Status Grid */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-[#121214] p-4 rounded-2xl border border-white/5 shadow-lg">
-              <div className="flex items-center gap-2 mb-2 opacity-50">
-                <Thermometer size={14} />
-                <span className="text-[10px] uppercase font-bold tracking-widest">Temperature</span>
+          <div className="flex-1 overflow-y-auto p-2 font-mono text-[9px] text-[#B3B3B3] space-y-1">
+            {hardwareLogs.map((log, i) => (
+              <div key={i} className="truncate">
+                <span className="opacity-30 mr-1">{new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' })}</span>
+                {log}
               </div>
-              <div className="text-3xl font-mono font-bold text-orange-500">
-                {currentTemp !== null ? `${currentTemp}°C` : '--'}
-              </div>
-              <div className="text-[10px] opacity-40 mt-1 uppercase tracking-tighter">Real-time Feed</div>
-            </div>
-            <div className="bg-[#121214] p-4 rounded-2xl border border-white/5 shadow-lg">
-              <div className="flex items-center gap-2 mb-2 opacity-50">
-                <Activity size={14} />
-                <span className="text-[10px] uppercase font-bold tracking-widest">Humidity</span>
-              </div>
-              <div className="text-3xl font-mono font-bold text-blue-500">
-                {currentHum !== null ? `${currentHum}%` : '--'}
-              </div>
-              <div className="text-[10px] opacity-40 mt-1 uppercase tracking-tighter">Ambient Level</div>
-            </div>
+            ))}
           </div>
+        </div>
+      </aside>
 
-          {/* Hardware Logs */}
-          <div className="flex-1 bg-[#121214] rounded-2xl border border-white/5 flex flex-col overflow-hidden shadow-xl">
-            <div className="p-4 border-b border-white/5 flex items-center justify-between bg-white/5">
-              <div className="flex items-center gap-2">
-                <Terminal size={18} className="text-orange-500" />
-                <span className="font-bold text-sm uppercase tracking-widest opacity-70">Hardware Logs</span>
-              </div>
-              <button 
-                onClick={() => setHardwareLogs([])}
-                className="text-[10px] uppercase font-bold tracking-widest opacity-40 hover:opacity-100 transition-opacity"
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col bg-[#121212] md:m-2 md:rounded-lg overflow-hidden relative">
+        <div className="absolute inset-0 bg-gradient-to-b from-[#1DB954]/10 to-transparent pointer-events-none" />
+        
+        {/* Header (Mobile) */}
+        <header className="md:hidden p-4 flex items-center justify-between border-b border-white/5 bg-black/40 backdrop-blur-md z-10">
+          <div className="flex items-center gap-2">
+            <Cpu className="text-[#1DB954]" size={20} />
+            <span className="font-bold">ESP32 Agent</span>
+          </div>
+          <button onClick={() => setIsConfigOpen(true)}>
+            <Settings size={20} className="text-[#B3B3B3]" />
+          </button>
+        </header>
+
+        {/* Chat Area */}
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 z-10 scrollbar-hide">
+          <AnimatePresence initial={false}>
+            {messages.map((msg, i) => (
+              <motion.div
+                key={i}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={cn(
+                  "flex flex-col gap-1",
+                  msg.role === 'user' ? "items-end" : "items-start"
+                )}
               >
-                Clear
+                <div className={cn(
+                  "max-w-[85%] md:max-w-[70%] p-3 md:p-4 rounded-2xl text-sm md:text-base",
+                  msg.role === 'user' 
+                    ? "bg-[#1DB954] text-black font-semibold rounded-br-none" 
+                    : msg.role === 'system'
+                    ? "bg-white/5 text-[#B3B3B3] text-[10px] uppercase tracking-widest font-bold py-1 px-4 rounded-full border border-white/5"
+                    : "bg-[#282828] text-white rounded-bl-none shadow-xl"
+                )}
+              >
+                {msg.content}
+              </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+          <div ref={chatEndRef} />
+        </div>
+
+        {/* Player Bar (Bottom) */}
+        <div className="h-24 bg-black border-t border-white/5 flex items-center px-4 md:px-8 gap-4 md:gap-8 z-20">
+          {/* Device Info */}
+          <div className="hidden lg:flex items-center gap-4 w-64">
+            <div className="w-12 h-12 bg-[#282828] rounded-md flex items-center justify-center shadow-lg">
+              <Cpu className={cn("w-6 h-6", isConnected ? "text-[#1DB954]" : "text-[#B3B3B3]")} />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-sm font-bold truncate max-w-[140px]">{isConnected ? deviceName : "No Device"}</span>
+              <span className="text-[10px] text-[#B3B3B3] uppercase tracking-widest">{isConnected ? "Connected" : "Disconnected"}</span>
+            </div>
+          </div>
+
+          {/* Controls */}
+          <div className="flex-1 flex flex-col items-center gap-2">
+            <div className="flex items-center gap-4 md:gap-6">
+              <button 
+                onClick={() => setIsContinuousMode(!isContinuousMode)}
+                className={cn(
+                  "p-2 transition-colors",
+                  isContinuousMode ? "text-[#1DB954]" : "text-[#B3B3B3] hover:text-white"
+                )}
+                title="Continuous Mode"
+              >
+                <RefreshCw size={20} className={isContinuousMode ? "animate-spin-slow" : ""} />
+              </button>
+              
+              <button 
+                onClick={toggleListening}
+                className={cn(
+                  "w-10 h-10 md:w-12 md:h-12 rounded-full flex items-center justify-center transition-transform active:scale-95 shadow-xl",
+                  isListening ? "bg-red-500 animate-pulse" : "bg-white text-black hover:scale-105"
+                )}
+              >
+                {isListening ? <MicOff size={24} /> : <Mic size={24} />}
+              </button>
+
+              <button 
+                onClick={isConnected ? handleDisconnect : handleConnect}
+                className={cn(
+                  "p-2 transition-colors",
+                  isConnected ? "text-[#1DB954]" : "text-[#B3B3B3] hover:text-white"
+                )}
+                title={isConnected ? "Disconnect" : "Connect"}
+              >
+                {isConnected ? <BluetoothOff size={20} /> : <Bluetooth size={20} />}
               </button>
             </div>
-            <div className="flex-1 p-4 font-mono text-[11px] space-y-1 overflow-y-auto scrollbar-hide">
-              {hardwareLogs.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-white/10 italic">
-                  Waiting for data...
-                </div>
-              ) : (
-                hardwareLogs.map((log, i) => (
-                  <div key={i} className={cn(
-                    "py-1 border-b border-white/5",
-                    log.startsWith('TX:') ? "text-orange-500/70" : "text-green-500/70"
-                  )}>
-                    <span className="opacity-30 mr-2">[{new Date().toLocaleTimeString()}]</span>
-                    {log}
-                  </div>
-                ))
-              )}
+
+            <div className="w-full max-w-2xl relative group">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                placeholder="What do you want to do?"
+                disabled={isProcessing}
+                className="w-full bg-[#282828] border-none rounded-full py-2 px-6 text-sm focus:ring-1 focus:ring-white/20 transition-all placeholder:text-[#B3B3B3]"
+              />
+              <button
+                onClick={() => handleSendMessage()}
+                disabled={!input.trim() || isProcessing}
+                className="absolute right-4 top-1/2 -translate-y-1/2 text-[#B3B3B3] hover:text-white disabled:opacity-0 transition-all"
+              >
+                <Send size={16} />
+              </button>
             </div>
           </div>
 
-          {/* Quick Controls */}
-          <div className="bg-[#121214] p-4 rounded-2xl border border-white/5 shadow-xl">
-            <div className="flex items-center gap-2 mb-4 opacity-50">
-              <Settings size={14} />
-              <span className="text-[10px] uppercase font-bold tracking-widest">Quick Actions</span>
-            </div>
-            <div className="flex flex-col gap-2">
-              <div className="flex gap-2">
-                <button 
-                  onClick={() => bluetoothService.sendCommand('LED_ON')}
-                  disabled={!isConnected}
-                  className="flex-1 py-2 bg-white/5 border border-white/10 rounded-lg text-[10px] uppercase font-bold tracking-widest hover:bg-white/10 disabled:opacity-30 transition-all"
-                >
-                  LED ON
-                </button>
-                <button 
-                  onClick={() => bluetoothService.sendCommand('LED_OFF')}
-                  disabled={!isConnected}
-                  className="flex-1 py-2 bg-white/5 border border-white/10 rounded-lg text-[10px] uppercase font-bold tracking-widest hover:bg-white/10 disabled:opacity-30 transition-all"
-                >
-                  LED OFF
-                </button>
-              </div>
-              <button 
-                onClick={() => handleSendMessage("Give me a full status report on the sensors and hardware.")}
-                disabled={!isConnected || isProcessing}
-                className="w-full py-2 bg-orange-500/10 border border-orange-500/20 rounded-lg text-[10px] uppercase font-bold tracking-widest hover:bg-orange-500/20 disabled:opacity-30 transition-all text-orange-500"
-              >
-                REPORT STATUS
-              </button>
+          {/* Volume / Extra */}
+          <div className="hidden lg:flex items-center justify-end gap-4 w-64">
+            <button 
+              onClick={() => setIsVoiceEnabled(!isVoiceEnabled)}
+              className="text-[#B3B3B3] hover:text-white transition-colors"
+            >
+              {isVoiceEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+            </button>
+            <div className="w-24 h-1 bg-[#4D4D4D] rounded-full overflow-hidden">
+              <div className={cn("h-full bg-[#1DB954]", isVoiceEnabled ? "w-full" : "w-0")} />
             </div>
           </div>
         </div>
       </main>
 
-      {/* Footer / Instructions */}
-      <footer className="max-w-6xl mx-auto p-4 text-center">
-        <p className="text-[10px] text-white/20 uppercase tracking-[0.2em] font-medium">
-          Web Bluetooth • Voice Recognition • Gemini AI Agent • Real-time Telemetry
-        </p>
-      </footer>
-
       {/* Hardware Configuration Modal */}
       <AnimatePresence>
         {isConfigOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="w-full max-w-2xl bg-[#18181B] border border-white/10 rounded-2xl overflow-hidden shadow-2xl"
+              className="w-full max-w-2xl bg-[#181818] rounded-2xl overflow-hidden shadow-2xl border border-white/5"
             >
-              <div className="p-6 border-b border-white/5 flex items-center justify-between bg-white/5">
+              <div className="p-6 border-b border-white/5 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 bg-orange-500/10 rounded-lg">
-                    <Settings className="w-5 h-5 text-orange-500" />
-                  </div>
-                  <div>
-                    <h2 className="text-lg font-bold">Hardware Manifest</h2>
-                    <p className="text-xs text-white/40 uppercase tracking-widest">Define your custom devices & commands</p>
-                  </div>
+                  <Settings className="w-6 h-6 text-[#1DB954]" />
+                  <h2 className="text-xl font-bold">Hardware Manifest</h2>
                 </div>
                 <button 
                   onClick={() => setIsConfigOpen(false)}
-                  className="p-2 hover:bg-white/5 rounded-lg transition-colors"
+                  className="p-2 hover:bg-white/5 rounded-full transition-colors"
                 >
-                  <RefreshCw className="w-5 h-5 opacity-40 rotate-45" />
+                  <RefreshCw className="w-5 h-5 opacity-50 rotate-45" />
                 </button>
               </div>
               
               <div className="p-6 space-y-4">
-                <div className="space-y-2">
-                  <label className="text-[10px] uppercase font-bold tracking-[0.2em] text-orange-500/70">
-                    System Instructions for the AI Agent
-                  </label>
-                  <p className="text-xs text-white/40 leading-relaxed">
-                    Describe your hardware setup here. The AI will use these instructions to understand what devices are connected and what commands to send via the <code className="text-orange-500/80 bg-orange-500/5 px-1 rounded">controlHardware</code> function.
-                  </p>
-                  <textarea
-                    value={hardwareManifest}
-                    onChange={(e) => {
-                      setHardwareManifest(e.target.value);
-                      localStorage.setItem('hardwareManifest', e.target.value);
-                    }}
-                    placeholder="e.g. 1. Relay 1: Controls the desk lamp (Action: RELAY_1:ON/OFF)..."
-                    className="w-full h-64 bg-[#09090B] border border-white/10 rounded-xl p-4 text-sm font-mono focus:outline-none focus:border-orange-500/50 transition-all resize-none"
-                  />
-                  <div className="flex justify-end">
-                    <button
-                      onClick={() => handleSendMessage("Please review my current hardware manifest and optimize the instructions for better control. If it's empty, suggest a standard starter setup.")}
-                      className="text-[10px] uppercase font-bold tracking-widest text-orange-500 hover:text-orange-400 transition-colors flex items-center gap-2"
-                    >
-                      <Zap size={12} />
-                      Optimize with AI
-                    </button>
-                  </div>
-                </div>
-                
-                <div className="bg-orange-500/5 border border-orange-500/10 rounded-xl p-4 flex gap-4 items-start">
-                  <Activity className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
-                  <div className="text-xs text-orange-500/80 leading-relaxed">
-                    <strong>Pro Tip:</strong> Be specific about the command strings your ESP32 expects. For example, if you use <code className="bg-orange-500/10 px-1 rounded">SERVO:90</code>, tell the agent exactly that.
-                  </div>
+                <textarea
+                  value={hardwareManifest}
+                  onChange={(e) => {
+                    setHardwareManifest(e.target.value);
+                    localStorage.setItem('hardwareManifest', e.target.value);
+                  }}
+                  className="w-full h-64 bg-[#121212] border border-white/5 rounded-xl p-4 text-sm font-mono focus:outline-none focus:border-[#1DB954]/50 transition-all resize-none"
+                />
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => handleSendMessage("Optimize my hardware manifest.")}
+                    className="text-[10px] uppercase font-bold tracking-widest text-[#1DB954] hover:text-[#1ed760] transition-colors flex items-center gap-2"
+                  >
+                    <Zap size={12} />
+                    Optimize with AI
+                  </button>
                 </div>
               </div>
 
-              <div className="p-6 bg-white/5 border-t border-white/5 flex justify-end">
+              <div className="p-6 bg-black/20 border-t border-white/5 flex justify-end">
                 <button
                   onClick={() => setIsConfigOpen(false)}
-                  className="px-8 py-3 bg-orange-500 hover:bg-orange-600 text-black font-bold rounded-xl transition-all shadow-lg shadow-orange-500/20"
+                  className="px-8 py-3 bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold rounded-full transition-all"
                 >
-                  Save Configuration
+                  Save
                 </button>
               </div>
             </motion.div>

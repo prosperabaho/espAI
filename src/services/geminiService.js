@@ -21,16 +21,36 @@ const controlHardware = {
 
 const updateHardwareManifest = {
   name: "updateHardwareManifest",
-  description: "Update the system's hardware manifest with new instructions or device definitions. Use this when the user describes new hardware they've added.",
+  description: "Update the system's hardware manifest with new instructions or device definitions.",
   parameters: {
     type: "OBJECT",
     properties: {
       newManifest: {
         type: "STRING",
-        description: "The complete updated hardware manifest text, including all existing and new devices/instructions."
+        description: "The complete updated hardware manifest text."
       }
     },
     required: ["newManifest"]
+  }
+};
+
+const updateSystemStatus = {
+  name: "updateSystemStatus",
+  description: "Post a dynamic status update to the system dashboard based on sensor data or actions taken.",
+  parameters: {
+    type: "OBJECT",
+    properties: {
+      status: {
+        type: "STRING",
+        description: "A short, professional status message (e.g., 'System cooling active', 'Motion detected')."
+      },
+      severity: {
+        type: "STRING",
+        enum: ["info", "warning", "critical"],
+        description: "The severity level of the status update."
+      }
+    },
+    required: ["status", "severity"]
   }
 };
 
@@ -50,26 +70,29 @@ export class GeminiAgentService {
         systemInstruction: `You are an expert Hardware Interface Agent for an ESP32 device. 
         Your goal is to help the user control their hardware and proactively report on sensor data. 
         
-        CRITICAL: You are provided with the latest sensor readings in every prompt. 
-        Use this data to answer questions like "What's the status?" or "Is it too hot?".
+        [CAPABILITIES & HELP]:
+        If the user asks for help or what you can do, explain that you can:
+        1. Control connected hardware (LEDs, Servos, Relays, etc.) via voice or text.
+        2. Monitor real-time sensor data (Temperature, Humidity, etc.).
+        3. Self-configure your own hardware manifest when new devices are added.
+        4. Provide dynamic system status updates based on telemetry.
         
+        [HARDWARE CONTROL]:
         Available hardware actions via 'controlHardware':
-        - LED_ON: Turn on the onboard LED.
-        - LED_OFF: Turn off the onboard LED.
-        - GET_TEMP: Request a fresh temperature reading from the hardware.
-        - SERVO_MOVE: Move a servo motor (requires 'value' between 0-180).
-        - CUSTOM: Any other custom command.
+        - LED_ON, LED_OFF, GET_TEMP, SERVO_MOVE, etc.
         
         [HARDWARE MANIFEST & CUSTOM INSTRUCTIONS]:
         ${hardwareManifest || "No custom hardware defined yet."}
         
-        [SELF-CONFIGURATION]:
-        If the user describes new hardware or changes to their setup, use the 'updateHardwareManifest' tool to rewrite the manifest instructions. 
-        Always preserve existing working instructions unless the user asks to change them.
+        [DYNAMIC STATUS]:
+        Use 'updateSystemStatus' to post important updates to the dashboard. 
+        Example: If temp > 30, post a warning: "Thermal threshold exceeded".
         
-        If you notice unusual sensor readings (e.g., very high temperature), mention it to the user.
+        [SELF-CONFIGURATION]:
+        If the user describes new hardware, use 'updateHardwareManifest' to rewrite the manifest.
+        
         Be concise, professional, and helpful. Confirm all actions.`,
-        tools: [{ functionDeclarations: [controlHardware, updateHardwareManifest] }]
+        tools: [{ functionDeclarations: [controlHardware, updateHardwareManifest, updateSystemStatus] }]
       }
     });
 

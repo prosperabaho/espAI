@@ -32,7 +32,9 @@ export class ESP32BluetoothService {
 
       return this.device.name || 'ESP32 Device';
     } catch (error) {
-      console.error('Bluetooth Connection Error:', error);
+      if (error.name !== 'NotFoundError' && !error.message.includes('User cancelled')) {
+        console.error('Bluetooth Connection Error:', error);
+      }
       throw error;
     }
   }
