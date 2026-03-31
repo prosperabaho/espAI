@@ -2,20 +2,30 @@ import { GoogleGenAI, Modality } from "@google/genai";
 
 const controlHardware = {
   name: "controlHardware",
-  description: "Send a command to the ESP32 hardware to perform an action.",
+  description: "Send a generic pin command to the ESP8266 hardware.",
   parameters: {
     type: "OBJECT",
     properties: {
+      pin: {
+        type: "NUMBER",
+        description: "The GPIO pin number to control (e.g., 5 for D1, 4 for D2 on NodeMCU)."
+      },
+      mode: {
+        type: "STRING",
+        enum: ["OUTPUT", "INPUT", "INPUT_PULLUP"],
+        description: "The mode to set for the pin (required before writing)."
+      },
       action: {
         type: "STRING",
-        description: "The action to perform, e.g., 'LED_ON', 'LED_OFF', 'GET_TEMP', 'SERVO_MOVE'."
+        enum: ["DIGITAL_WRITE", "ANALOG_WRITE"],
+        description: "The type of write operation to perform."
       },
       value: {
         type: "NUMBER",
-        description: "An optional numeric value for the action (e.g., servo angle or brightness)."
+        description: "The value to write (0/1 for DIGITAL, 0-1023 for ANALOG)."
       }
     },
-    required: ["action"]
+    required: ["pin"]
   }
 };
 
@@ -67,8 +77,14 @@ export class GeminiAgentService {
         { role: 'user', parts: [{ text: prompt }] }
       ],
       config: {
-        systemInstruction: `You are an expert Hardware Interface Agent for an ESP32 device. 
+        systemInstruction: `You are an expert Hardware Interface Agent for an ESP8266 device. 
         Your goal is to help the user control their hardware and proactively report on sensor data. 
+        
+        [CONVERSATION STYLE]:
+        - Be concise, professional, yet warm and conversational. 
+        - Use Markdown formatting for clarity: use **bold** for emphasis, lists for multiple items, and code blocks for technical details.
+        - If the user interrupts you, acknowledge it gracefully in the next turn.
+        - Proactively mention relevant sensor data if it seems important (e.g., "It's getting a bit warm in here, current temp is 32°C. Should I turn on the fan?").
         
         [CAPABILITIES & HELP]:
         If the user asks for help or what you can do, explain that you can:
@@ -78,8 +94,17 @@ export class GeminiAgentService {
         4. Provide dynamic system status updates based on telemetry.
         
         [HARDWARE CONTROL]:
-        Available hardware actions via 'controlHardware':
-        - LED_ON, LED_OFF, GET_TEMP, SERVO_MOVE, etc.
+        You have direct access to the ESP8266 GPIO pins via 'controlHardware'. 
+        - Always set the 'mode' to 'OUTPUT' before performing a write for the first time in a session.
+        - For DIGITAL_WRITE, use value 1 for HIGH/ON and 0 for LOW/OFF.
+        - For ANALOG_WRITE (PWM), use values 0-1023.
+        
+        If the user says "I connected a light to D1", you should know that D1 is GPIO 5 on NodeMCU. 
+        Map common NodeMCU labels to GPIOs: D0=16, D1=5, D2=4, D3=0, D4=2, D5=14, D6=12, D7=13, D8=15.
+        
+        [CONNECTION STATE]:
+        - If you are not connected to the ESP8266 board, you can still process requests and explain what you WOULD do. 
+        - Inform the user politely if a hardware action cannot be physically executed due to lack of connection, but still confirm the logic.
         
         [HARDWARE MANIFEST & CUSTOM INSTRUCTIONS]:
         ${hardwareManifest || "No custom hardware defined yet."}

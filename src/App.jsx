@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import ReactMarkdown from 'react-markdown';
 import { 
-  Bluetooth, 
-  BluetoothOff, 
+  Wifi, 
+  WifiOff, 
   Cpu, 
   Send, 
   Terminal, 
@@ -17,7 +18,8 @@ import {
   MicOff,
   Volume2,
   VolumeX,
-  TrendingUp
+  TrendingUp,
+  Square
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -30,7 +32,7 @@ import {
   AreaChart,
   Area
 } from 'recharts';
-import { bluetoothService } from './services/bluetoothService';
+import { wifiService } from './services/wifiService';
 import { geminiAgent } from './services/geminiService';
 import { cn } from './lib/utils';
 
@@ -38,7 +40,7 @@ export default function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [deviceName, setDeviceName] = useState(null);
   const [messages, setMessages] = useState([
-    { role: 'model', content: "Hello! I'm your ESP32 Hardware Agent. I can now listen to your voice and show you real-time sensor data. Connect your device to begin." }
+    { role: 'model', content: "Hello! I'm your ESP8266 Hardware Agent. I can now listen to your voice and show you real-time sensor data. Connect your device to begin." }
   ]);
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -51,7 +53,10 @@ export default function App() {
   const [currentHum, setCurrentHum] = useState(null);
   const [hardwareManifest, setHardwareManifest] = useState(() => {
     return localStorage.getItem('hardwareManifest') || 
-      "1. Relay 1: Controls the desk lamp (Action: RELAY_1:ON/OFF)\n2. Servo 1: Controls the window blind (Action: SERVO_1:0-180)\n3. NeoPixel: RGB strip for mood lighting (Action: RGB:R,G,B)";
+      "I am a Generic Pin Controller. I don't have hardcoded devices.\n" +
+      "Ask the user what they have connected to which pins (D0-D8).\n" +
+      "Mapping: D0=16, D1=5, D2=4, D3=0, D4=2, D5=14, D6=12, D7=13, D8=15.\n" +
+      "Example: If a relay is on D1, I should use GPIO 5 with mode OUTPUT.";
   });
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [systemStatus, setSystemStatus] = useState([
@@ -102,11 +107,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    bluetoothService.onMessageReceived = (msg) => {
+    wifiService.onMessageReceived = (msg) => {
       setHardwareLogs(prev => [msg, ...prev].slice(0, 50));
     };
 
-    bluetoothService.onSensorData = (key, value) => {
+    wifiService.onSensorData = (key, value) => {
       const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       
       if (key === 'TEMP') {
@@ -121,38 +126,56 @@ export default function App() {
 
   const handleConnect = async () => {
     try {
-      const name = await bluetoothService.connect();
+      const name = await wifiService.connect();
       setDeviceName(name);
       setIsConnected(true);
       setMessages(prev => [...prev, { role: 'system', content: `Connected to ${name}` }]);
       if (navigator.vibrate) navigator.vibrate(100);
     } catch (error) {
-      if (error.name === 'NotFoundError' || error.message.includes('User cancelled')) {
-        return; // Silently ignore cancellation
-      }
       console.error(error);
-      setMessages(prev => [...prev, { role: 'system', content: 'Connection failed. Ensure Bluetooth is enabled.' }]);
+      setMessages(prev => [...prev, { role: 'system', content: 'Connection failed. Ensure WiFi is enabled and the relay is up.' }]);
     }
   };
 
   const handleDisconnect = () => {
-    bluetoothService.disconnect();
+    wifiService.disconnect();
     setIsConnected(false);
     setDeviceName(null);
-    setMessages(prev => [...prev, { role: 'system', content: 'Disconnected from device.' }]);
+    setMessages(prev => [...prev, { role: 'system', content: 'Disconnected from WiFi.' }]);
     if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
   };
 
-  const audioRef = useRef(null);
+  const audioCtxRef = useRef(null);
+  const audioSourceRef = useRef(null);
+
+  const stopAudio = () => {
+    if (audioSourceRef.current) {
+      try {
+        audioSourceRef.current.stop();
+      } catch (e) {
+        console.error("Error stopping audio:", e);
+      }
+      audioSourceRef.current = null;
+    }
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      audioCtxRef.current.close();
+      audioCtxRef.current = null;
+    }
+  };
+
+  const handleInterrupt = () => {
+    stopAudio();
+    if (isListening) {
+      recognitionRef.current?.stop();
+    }
+    setIsProcessing(false);
+  };
 
   const toggleListening = () => {
     if (isListening) {
       recognitionRef.current?.stop();
     } else {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
+      stopAudio();
       try {
         recognitionRef.current?.start();
       } catch (e) {
@@ -166,21 +189,53 @@ export default function App() {
     
     const base64 = await geminiAgent.generateSpeech(text);
     if (base64) {
+      stopAudio();
+      
       return new Promise((resolve) => {
-        const audio = new Audio(`data:audio/wav;base64,${base64}`);
-        audioRef.current = audio;
-        audio.onended = () => {
-          audioRef.current = null;
+        try {
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+          audioCtxRef.current = audioCtx;
+          
+          if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+          }
+          
+          const binaryString = atob(base64);
+          const len = binaryString.length;
+          const bytes = new Int16Array(len / 2);
+          for (let i = 0; i < len; i += 2) {
+            bytes[i / 2] = (binaryString.charCodeAt(i + 1) << 8) | binaryString.charCodeAt(i);
+          }
+          
+          const float32 = new Float32Array(bytes.length);
+          for (let i = 0; i < bytes.length; i++) {
+            float32[i] = bytes[i] / 32768;
+          }
+          
+          const buffer = audioCtx.createBuffer(1, float32.length, 24000);
+          buffer.getChannelData(0).set(float32);
+          
+          const source = audioCtx.createBufferSource();
+          source.buffer = buffer;
+          
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = volume;
+          
+          source.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+          
+          audioSourceRef.current = source;
+          
+          source.onended = () => {
+            audioSourceRef.current = null;
+            resolve();
+          };
+          
+          source.start();
+        } catch (e) {
+          console.error("Audio playback failed:", e);
           resolve();
-        };
-        audio.onerror = () => {
-          audioRef.current = null;
-          resolve();
-        };
-        audio.play().catch(e => {
-          console.error("Audio play failed:", e);
-          resolve();
-        });
+        }
       });
     }
   };
@@ -192,6 +247,7 @@ export default function App() {
     if (!textOverride) setInput('');
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setIsProcessing(true);
+    setIsThinking(true);
 
     try {
       const history = messages.map(m => ({
@@ -203,20 +259,21 @@ export default function App() {
       const fullPrompt = `${sensorContext}\nUser: ${userMsg}`;
 
       const response = await geminiAgent.processCommand(fullPrompt, history, hardwareManifest);
+      setIsThinking(false);
       
       if (response.functionCalls) {
         for (const call of response.functionCalls) {
           if (call.name === 'controlHardware') {
-            const { action, value } = call.args;
-            const cmdString = value !== undefined ? `${action}:${value}` : action;
+            const { pin, mode, action, value } = call.args;
+            // Format: PIN:MODE:ACTION:VALUE
+            const cmdString = `${pin}:${mode || 'X'}:${action || 'X'}:${value !== undefined ? value : 'X'}`;
             
             if (isConnected) {
-              await bluetoothService.sendCommand(cmdString);
+              await wifiService.sendCommand(cmdString);
               setHardwareLogs(prev => [`TX: ${cmdString}`, ...prev]);
               if (navigator.vibrate) navigator.vibrate(50);
             } else {
-              setHardwareLogs(prev => [`[TEST MODE] Would send: ${cmdString}`, ...prev]);
-              setMessages(prev => [...prev, { role: 'system', content: `Test Mode: Command "${cmdString}" simulated.` }]);
+              setHardwareLogs(prev => [`[OFFLINE] Pin Command: ${cmdString}`, ...prev]);
             }
           } else if (call.name === 'updateHardwareManifest') {
             const { newManifest } = call.args;
@@ -253,16 +310,29 @@ export default function App() {
       setMessages(prev => [...prev, { role: 'model', content: "Sorry, I encountered an error processing that." }]);
     } finally {
       setIsProcessing(false);
+      setIsThinking(false);
     }
   };
 
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const [volume, setVolume] = useState(0.5);
+
+  useEffect(() => {
+    const resumeAudio = () => {
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume();
+      }
+    };
+    window.addEventListener('click', resumeAudio);
+    return () => window.removeEventListener('click', resumeAudio);
+  }, []);
 
   const handleUnlock = (e) => {
     e.preventDefault();
-    if (passwordInput.toLowerCase() === 'esp') {
+    if (passwordInput.toLowerCase() === 'heisenberg') {
       setIsUnlocked(true);
       if (navigator.vibrate) navigator.vibrate(100);
     } else {
@@ -284,9 +354,9 @@ export default function App() {
               <Cpu className="w-10 h-10 text-black" />
             </div>
           </div>
-          <h1 className="text-3xl font-bold text-center mb-4 text-white">System Locked</h1>
+          <h1 className="text-3xl font-bold text-center mb-4 text-white">Say my name</h1>
           <p className="text-[#B3B3B3] text-center mb-10 text-sm leading-relaxed">
-            "To proceed, enter the 3-letter code for the 'Electronic Signal Processor' module found on the main circuit board."
+            "You know who I am. You're goddamn right."
           </p>
           <form onSubmit={handleUnlock} className="space-y-6">
             <input
@@ -319,7 +389,7 @@ export default function App() {
           <div className="w-8 h-8 rounded-lg bg-[#1DB954] flex items-center justify-center">
             <Cpu className="w-5 h-5 text-black" />
           </div>
-          <h1 className="font-bold text-lg tracking-tight">ESP32 Agent</h1>
+          <h1 className="font-bold text-lg tracking-tight">ESP8266 Agent</h1>
         </div>
 
         <nav className="flex flex-col gap-2">
@@ -388,7 +458,7 @@ export default function App() {
         <header className="md:hidden p-4 flex items-center justify-between border-b border-white/5 bg-black/40 backdrop-blur-md z-10">
           <div className="flex items-center gap-2">
             <Cpu className="text-[#1DB954]" size={20} />
-            <span className="font-bold">ESP32 Agent</span>
+            <span className="font-bold">ESP8266 Agent</span>
           </div>
           <button onClick={() => setIsConfigOpen(true)}>
             <Settings size={20} className="text-[#B3B3B3]" />
@@ -414,13 +484,33 @@ export default function App() {
                     ? "bg-[#1DB954] text-black font-semibold rounded-br-none" 
                     : msg.role === 'system'
                     ? "bg-white/5 text-[#B3B3B3] text-[10px] uppercase tracking-widest font-bold py-1 px-4 rounded-full border border-white/5"
-                    : "bg-[#282828] text-white rounded-bl-none shadow-xl"
+                    : "bg-[#282828] text-white rounded-bl-none shadow-xl prose prose-invert prose-sm max-w-none"
                 )}
               >
-                {msg.content}
+                {msg.role === 'model' ? (
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                ) : (
+                  msg.content
+                )}
               </div>
               </motion.div>
             ))}
+            {isThinking && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex flex-col gap-1 items-start"
+              >
+                <div className="bg-[#282828] text-white p-4 rounded-2xl rounded-bl-none shadow-xl flex items-center gap-3">
+                  <div className="flex gap-1">
+                    <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5, delay: 0 }} className="w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+                    <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5, delay: 0.2 }} className="w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+                    <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5, delay: 0.4 }} className="w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+                  </div>
+                  <span className="text-xs font-bold text-[#B3B3B3] uppercase tracking-widest">Thinking</span>
+                </div>
+              </motion.div>
+            )}
           </AnimatePresence>
           <div ref={chatEndRef} />
         </div>
@@ -439,7 +529,27 @@ export default function App() {
           </div>
 
           {/* Controls */}
-          <div className="flex-1 flex flex-col items-center gap-2">
+          <div className="flex-1 flex flex-col items-center gap-2 relative">
+            <AnimatePresence>
+              {(isProcessing || audioSourceRef.current) && (
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.5, y: 20 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.5, y: 20 }}
+                  className="absolute -top-24 left-1/2 -translate-x-1/2 z-50"
+                >
+                  <button 
+                    onClick={handleInterrupt}
+                    className="w-20 h-20 md:w-24 md:h-24 rounded-full bg-red-600 flex flex-col items-center justify-center transition-all active:scale-90 shadow-2xl hover:bg-red-500 ring-4 ring-red-600/20"
+                    title="Interrupt"
+                  >
+                    <Square size={32} fill="currentColor" />
+                    <span className="text-[10px] font-bold uppercase mt-1">Stop</span>
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <div className="flex items-center gap-4 md:gap-6">
               <button 
                 onClick={() => setIsContinuousMode(!isContinuousMode)}
@@ -470,7 +580,7 @@ export default function App() {
                 )}
                 title={isConnected ? "Disconnect" : "Connect"}
               >
-                {isConnected ? <BluetoothOff size={20} /> : <Bluetooth size={20} />}
+                {isConnected ? <WifiOff size={20} /> : <Wifi size={20} />}
               </button>
             </div>
 
@@ -502,8 +612,16 @@ export default function App() {
             >
               {isVoiceEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
             </button>
-            <div className="w-24 h-1 bg-[#4D4D4D] rounded-full overflow-hidden">
-              <div className={cn("h-full bg-[#1DB954]", isVoiceEnabled ? "w-full" : "w-0")} />
+            <div className="w-32 flex items-center gap-2">
+              <input 
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={volume}
+                onChange={(e) => setVolume(parseFloat(e.target.value))}
+                className="w-full h-1 bg-[#4D4D4D] rounded-full appearance-none cursor-pointer accent-[#1DB954]"
+              />
             </div>
           </div>
         </div>
